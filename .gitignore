@@ -1,0 +1,5 @@
+# Keep only what the published game needs: index.html, MO/*.jpg and RA2YR/*.jpg
+*.png
+names.json
+cnc-guessr.html
+mapguesser-v2.html

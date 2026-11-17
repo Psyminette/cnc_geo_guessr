@@ -58,7 +58,14 @@ th{color:var(--muted);font-weight:500}
 
 #namePanel{position:absolute;inset:0;display:flex;flex-direction:column;padding:18px;background:var(--panel)}
 #namePanel h2{margin:0 0 10px;font-size:19px}
-#nameFilter{width:100%}
+#nameTools{display:flex;gap:10px;align-items:center}
+#nameFilter{flex:1;min-width:0}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;flex:none}
+.seg button{border:0;border-radius:0;padding:7px 12px;background:var(--panel2);font-size:13.5px}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.on{background:var(--accent);color:#1a1405;font-weight:650}
+#nameList .grp{grid-column:1/-1;margin:8px 0 -2px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+#nameList .grp:first-child{margin-top:0}
 #nameList{flex:1;overflow:auto;margin-top:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px;align-content:start;grid-auto-rows:max-content}
 #nameList button{text-align:left;min-height:40px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #nameList button.sel{background:var(--accent);border-color:var(--accent);color:#1a1405;font-weight:650}
@@ -137,7 +144,13 @@ th{color:var(--muted);font-weight:500}
     <div class="pane">
       <div id="namePanel">
         <h2>Which map is this?</h2>
-        <input type="text" id="nameFilter" placeholder="Type to filter…" autocomplete="off" spellcheck="false">
+        <div id="nameTools">
+          <input type="text" id="nameFilter" placeholder="Type to filter…" autocomplete="off" spellcheck="false">
+          <div class="seg" role="group" aria-label="Sort map names">
+            <button type="button" id="sortAZ" title="Sort map names alphabetically">A–Z</button>
+            <button type="button" id="sortCampaign" title="Sort map names in campaign mission order">Campaign order</button>
+          </div>
+        </div>
         <div id="nameList"></div>
       </div>
       <div class="mapview" id="gameMap" style="display:none"><div class="tag" id="mapTag"></div></div>
@@ -604,7 +617,7 @@ async function loadFolder(fileList) {
     const fallback = base(p).replace(/\.[^.]+$/, '').replace(/_+/g, ' ').trim() || base(p);
     const noExt = s => s.replace(/\.[^./]+$/, '');
     const name = custom[p.toLowerCase()] || custom[base(p).toLowerCase()] || custom[noExt(p.toLowerCase())] || custom[noExt(base(p).toLowerCase())] || fallback;
-    lib.panos.push({ file: files.get(p), name, url: null, img: null });
+    lib.panos.push({ file: files.get(p), fname: base(p), name, url: null, img: null });
   }
   finishLib();
 }
@@ -615,14 +628,46 @@ function clearLib() {
 }
 function loadCategory(cat) {
   clearLib(); lib.catId = cat.id; lib.catName = cat.name;
-  lib.panos = cat.maps.map(([f, name]) => ({ name, url: cat.dir + '/' + encodeURIComponent(f), img: null, detail: DETAIL[cat.dir + '/' + f] || null }));
+  lib.panos = cat.maps.map(([f, name]) => ({ fname: f, name, url: cat.dir + '/' + encodeURIComponent(f), img: null, detail: DETAIL[cat.dir + '/' + f] || null }));
   try { localStorage.setItem('cncguessr.category', cat.id); } catch (e) {}
   finishLib();
 }
+// Campaign position from a panorama's filename.
+//   RA2YR:        map_a1 … map_a12, map_s1 … map_s12, map_yra1 …, map_yrs1 …, map_t1 (Boot Camp)
+//   Mental Omega: allied_01 …, allied_co-op_01 …, allied_special_op_<name>, then soviet, epsilon, foehn
+// "-2" style suffixes (multi-part missions) sort after "-1". Anything else lands in "Other", by filename.
+const RA2_GROUPS = { a: [0, 'Allied'], s: [1, 'Soviet'], yra: [2, "Yuri's Revenge · Allied"], yrs: [3, "Yuri's Revenge · Soviet"], t: [4, 'Boot Camp'] };
+const MO_FACTIONS = ['allied', 'soviet', 'epsilon', 'foehn'];
+const MO_KINDS = [['', ''], ['co-op_', ' · Co-op'], ['special_op_', ' · Special Ops']];
+const cap = w => w[0].toUpperCase() + w.slice(1);
+function campaignKey(fname) {
+  const f = fname.toLowerCase();
+  const part = +(f.match(/-(\d+)\.[^.]+$/) || [0, 0])[1];
+  let m = f.match(/^map_(yra|yrs|a|s|t)(\d+)_/);
+  if (m) { const [rank, label] = RA2_GROUPS[m[1]]; return { group: rank, label, num: +m[2], part, fname: f }; }
+  m = f.match(/^(allied|soviet|epsilon|foehn)_(co-op_|special_op_)?(\d+)?/);
+  if (m) {
+    const k = MO_KINDS.findIndex(x => x[0] === (m[2] || ''));
+    return { group: 100 + MO_FACTIONS.indexOf(m[1]) * 3 + k, label: cap(m[1]) + MO_KINDS[k][1],
+             num: m[3] ? +m[3] : Infinity, part, fname: f };
+  }
+  return { group: 999, label: 'Other', num: Infinity, part, fname: f };
+}
+function compareKeys(a, b) {
+  return a.group - b.group || (a.num === b.num ? 0 : a.num < b.num ? -1 : 1) || a.part - b.part ||
+    a.fname.localeCompare(b.fname, undefined, { numeric: true });
+}
+
 function finishLib() {
-  const seen = new Map();
-  lib.panos.forEach(p => { if (!seen.has(norm(p.name))) seen.set(norm(p.name), p.name); });
-  lib.names = [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const seen = new Map(); // normalised name -> { name, key } using the earliest panorama with that name
+  lib.panos.forEach(p => {
+    const key = campaignKey(p.fname || ''), cur = seen.get(norm(p.name));
+    if (!cur) seen.set(norm(p.name), { name: p.name, key });
+    else if (compareKeys(key, cur.key) < 0) cur.key = key;
+  });
+  const entries = [...seen.values()];
+  lib.names = entries.map(e => e.name).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  lib.namesCampaign = entries.slice().sort((a, b) => compareKeys(a.key, b.key));
   lib.loaded = true;
   refreshStart();
 }
@@ -904,13 +949,37 @@ async function startRound() {
   $('nameFilter').focus();
 }
 
+let nameSort = 'az';
+try { if (localStorage.getItem('cncguessr.nameSort') === 'campaign') nameSort = 'campaign'; } catch (e) {}
+function setNameSort(mode) {
+  nameSort = mode;
+  try { localStorage.setItem('cncguessr.nameSort', mode); } catch (e) {}
+  if (G && G.stage === 'name') { renderNames(); $('nameFilter').focus(); } else syncSortButtons();
+}
+function syncSortButtons() {
+  $('sortAZ').classList.toggle('on', nameSort === 'az'); $('sortAZ').setAttribute('aria-pressed', nameSort === 'az');
+  $('sortCampaign').classList.toggle('on', nameSort === 'campaign'); $('sortCampaign').setAttribute('aria-pressed', nameSort === 'campaign');
+}
+
 function renderNames() {
+  syncSortButtons();
   const q = norm($('nameFilter').value);
-  const shown = lib.names.filter(n => norm(n).includes(q));
+  const campaign = nameSort === 'campaign';
+  const entries = campaign ? lib.namesCampaign : lib.names.map(name => ({ name }));
+  const shownEntries = entries.filter(e => norm(e.name).includes(q));
+  const shown = shownEntries.map(e => e.name);
   if (G.picked && !shown.includes(G.picked)) G.picked = null;
   if (q && shown.length === 1) G.picked = shown[0];
   const list = $('nameList'); list.textContent = '';
-  shown.forEach(n => {
+  // group headings only make sense when the filenames were recognised as campaign missions
+  const headings = campaign && shownEntries.some(e => e.key.group !== 999);
+  let lastLabel = null;
+  shownEntries.forEach(e => {
+    const n = e.name;
+    if (headings && e.key.label !== lastLabel) {
+      const h = document.createElement('div'); h.className = 'grp'; h.textContent = e.key.label; list.appendChild(h);
+      lastLabel = e.key.label;
+    }
     const b = document.createElement('button'); b.textContent = n; b.title = n;
     if (n === G.picked) b.className = 'sel';
     b.onclick = () => { G.picked = n; renderNames(); };
@@ -1049,6 +1118,9 @@ $('playBtn').onclick = startGame;
 $('zoomBtn').onclick = zoomOut;
 $('clue').onclick = zoomOut;
 $('nameFilter').oninput = renderNames;
+$('sortAZ').onclick = () => setNameSort('az');
+$('sortCampaign').onclick = () => setNameSort('campaign');
+syncSortButtons();
 $('nameBtn').onclick = submitName;
 $('pinBtn').onclick = submitPin;
 $('nextBtn').onclick = nextRound;
